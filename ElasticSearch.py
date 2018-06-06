@@ -10,8 +10,7 @@ es = Elasticsearch([{'host': 'localhost', 'port': 9200}])
 
 def main():	
 	parser = optparse.OptionParser()
-	parser.add_option('-i', '--state-name', dest='state_name', metavar='<name>', default='new-jersey', 
-														type='str', help='The state name to process')
+	parser.add_option('-i', '--state-name', dest='state_name', default='new-jersey', type='str')
 	opts, args = parser.parse_args()
 	SearchDoctors(opts.state_name)
 
@@ -24,57 +23,18 @@ class SearchDoctors:
 	specialist = None
 	city_list = []
 	specialist_list = []
-	number_of_city = 0
-	counter = 0
-	index_name = 'doctors-index-test'
+	index_name = 'doctors-index-test-7th'
 	threads = []
+	process_start_time = None
 
 	def finish_processing(self):
 		for process in threads:
 			process.join()
 
-	# def create_summary(self):
-	# 	'''
-	# 	Create summary reporte in json format
-	# 	'''
-	# 	print "------- Total number of doctors by city ---------"
-	# 	for city in self.city_list:
-	# 		q = {
-	# 			    "query" : {
-	# 			        "constant_score" : { 
-	# 			            "filter" : {
-	# 			                "term" : { 
-	# 			                    "city" : city
-	# 			                }
-	# 			            }
-	# 			        }
-	# 			    }
-	# 			}
-	# 		matches = es.search(index=self.index_name, body=q)
-	# 		print "%s - %s" % (city, str(len(matches['hits']['hits'])))
-
-	# 	print "Total number of doctors by specialty (element g of the scrapped elements)"
-	# 	for specialist in self.specialist_list:
-	# 		print specialist,"<<<<<<<<<<<<<<<<"
-	# 		q = {
-	# 			    "query" : {
-	# 			        "constant_score" : { 
-	# 			            "filter" : {
-	# 			                "term" : { 
-	# 			                    "specialties" : specialist
-	# 			                }
-	# 			            }
-	# 			        }
-	# 			    }
-	# 			}
-	# 		matches = es.search(index=self.index_name, body=q)
-	# 		print "%s - %s" % (specialist, str(len(matches['hits']['hits'])))
-
 	def add_to_elasticsearch(self, doctor_id=None, details={}):
 		'''
 		Data load into elasticsearch 
 		'''
-		print self.city_name, self.specialist, details['full_name'],"<<<<<<<<<<<<<<<<<<<<<<<<<"
 		es.index(index=self.index_name, doc_type=self.specialist, id=doctor_id, body=details)
 
 	def get_doctor_id(self, doctor_url):
@@ -85,7 +45,7 @@ class SearchDoctors:
 		doctor_id = split_urls[-1].split('-')[-1]
 		return doctor_id	
 
-	def get_docter_details(self, content):
+	def get_docter_details(self, doctor_id, content):
 		'''
 		Scrap doctor details
 		'''
@@ -127,40 +87,32 @@ class SearchDoctors:
 				for certification in section_contents.find_all('li', {'class': ['block-tight']}):
 					certification_and_licensure.append(certification.get_text().strip())
 				details['certification_and_licensure'] = certification_and_licensure
+		self.add_to_elasticsearch(doctor_id=doctor_id, details=details)		
 		return details		
 
-	def manage_items(self, items, item_type='specialist_doctors'):
+	def manage_items(self, items):
 		'''
 		Manage results
 		'''
-		doctor_counter = 0
-		if item_type == 'city':
-			# items = items[:1]
-			self.number_of_city = len(items)
-		elif item_type == 'doctor':	
-			number_of_doctor = len(items)
-		else:
-			number_of_doctor = 0
-			# items = items[:2]
-		for item in items:
-			if item_type == 'city':
-				self.counter += 1		
+		for item in items:	
 			if item.name == 'a':
 				if 'Dr.' in item.get_text().strip():
-					doctor_counter += 1
 					doctor_name =item.get_text().strip()
 					doctor_url = item['href']
-					doctor_detail_contents = self.load_url(doctor_url)					
-					doctor_details = self.get_docter_details(doctor_detail_contents)
-					doctor_id = self.get_doctor_id(doctor_url)
-					self.add_to_elasticsearch(doctor_id=doctor_id, details=doctor_details)					
-					if number_of_doctor == doctor_counter and self.number_of_city == self.counter:
-						self.finish_processing()
+					doctor_detail_contents = self.load_url(doctor_url)
+					doctor_id = self.get_doctor_id(doctor_url)			
+					# doctor_details = self.get_docter_details(doctor_id, doctor_detail_contents)
+					process = Thread(target=self.get_docter_details, args=[doctor_id, doctor_detail_contents])
+					process.start()
+					self.threads.append(process)
 			else:
 				item_name = item.a.get_text().strip()
 				item_url = item.a['href']
 				self.get_page_items(item_url)
 
+		for process in self.threads:
+			print process,self.process_start_time,datetime.datetime.now()
+			process.join()
 
 	def parse_index_items(self, content, element='li', class_name='index-item'):
 		'''
@@ -179,30 +131,31 @@ class SearchDoctors:
 		response = requests.get(url, headers=headers)
 		return response.content			
 
-	def get_page_items(self, url, item_type='specialist_doctors'):
+	def get_page_items(self, url):
 		'''
 		Get all the items from the page
 		'''
 		result_contents = self.load_url(url)
-		url_text = ['specialists-index', 'city-index']
+		url_text = ['specialists-index']
 		if any(text in url for text in url_text):
 			result_items = self.parse_index_items(result_contents)			
 		else:
-			item_type = 'doctor'
 			details_from_url = url.split('/')
 			self.city_name = details_from_url[-1]
 			self.specialist = details_from_url[-3]
 			result_items = self.parse_index_items(result_contents, element='a', class_name='search-result-link')
-		# self.manage_items(result_items, item_type=item_type)
-
-		process = Thread(target=self.manage_items, args=[result_items], kwargs={'item_type':item_type})
-		process.start()
-		self.threads.append(process)
+		self.manage_items(result_items)
 
 	def __init__(self, state_name):
 		self.state_name = state_name	
 		state_url = '/doctors/city-index/'+self.state_name
-		self.get_page_items(state_url, item_type='city')					
+		state_url_result_contents = self.load_url(state_url)
+		state_result_items = self.parse_index_items(state_url_result_contents)
+		self.process_start_time = datetime.datetime.now()
+		for item in state_result_items[:1]:
+			item_name = item.a.get_text().strip()
+			item_url = item.a['href']
+			self.get_page_items(item_url)
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,4 @@
+beautifulsoup4==4.6.0
+elasticsearch==6.2.0
+elasticsearch-dsl==6.1.0
+requests==2.6.0
