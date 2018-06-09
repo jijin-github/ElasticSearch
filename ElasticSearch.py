@@ -155,13 +155,8 @@ class SearchDoctors:
 		self.state_name = state_name	
 		state_url = '/doctors/city-index/'+self.state_name
 		state_url_result_contents = self.load_url(state_url)
-		# state_result_items = self.parse_index_items(state_url_result_contents)
-
-		soup = BeautifulSoup(state_url_result_contents, 'html.parser')
-		state_url_result_contents = soup.find_all('div', {'class': ['flex-small-12 flex-large-6']})[1]
-		state_result_items = state_url_result_contents.find_all('li', {'class': ['index-item']})
-
-		
+		state_result_items = self.parse_index_items(state_url_result_contents)
+				
 		self.process_start_time = datetime.datetime.now()
 		print "Start-----------",datetime.datetime.now()
 		for i in range(self.num_fetch_threads):
