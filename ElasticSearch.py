@@ -1,12 +1,14 @@
 import requests
 import optparse
-from threading import Thread
 import datetime
+import time
 
+from Queue import Queue
+from threading import Thread
+from multiprocessing import Process
 from bs4 import BeautifulSoup
 from elasticsearch import Elasticsearch
 
-es = Elasticsearch([{'host': 'localhost', 'port': 9200}])
 
 def main():	
 	parser = optparse.OptionParser()
@@ -21,11 +23,11 @@ class SearchDoctors:
 	state_name = None
 	city_name = None
 	specialist = None
-	city_list = []
-	specialist_list = []
-	index_name = 'doctors-index-test-7th'
+	index_name = 'index-doctors-details'
 	threads = []
 	process_start_time = None
+	num_fetch_threads = 20
+	enclosure_queue = Queue()
 
 	def finish_processing(self):
 		for process in threads:
@@ -35,6 +37,7 @@ class SearchDoctors:
 		'''
 		Data load into elasticsearch 
 		'''
+		es = Elasticsearch([{'host': 'localhost', 'port': 9200}])
 		es.index(index=self.index_name, doc_type=self.specialist, id=doctor_id, body=details)
 
 	def get_doctor_id(self, doctor_url):
@@ -53,28 +56,32 @@ class SearchDoctors:
 		soup = BeautifulSoup(content, 'html.parser')		
 		details['state'] = self.state_name
 		details['city'] = self.city_name
-		if self.city_name not in self.city_list:
-			self.city_list.append(self.city_name)	    		
 		details['specialties'] = self.specialist
-		if self.specialist not in self.specialist_list:
-			self.specialist_list.append(self.specialist)
 		overview = soup.find('div', {'class': ['block-normal clearfix']})
 		if overview:
 			details['overview'] = overview.get_text().strip()
-		details['full_name'] = soup.find('h3', {'class': ['block-loose heading-large']}).get_text().strip()
+		full_name = soup.find('h3', {'class': ['block-loose heading-large']})
+		if full_name:	
+			details['full_name'] = full_name.get_text().strip()
+			print '-------------',self.city_name, self.specialist, full_name.get_text().strip(),"------------------------------------------"
 		years_in_practice = soup.find_all('span', {'class': ['text-large heading-normal-for-small-only right-for-medium-up']})
 		if years_in_practice:
 			details['years_in_practice'] = years_in_practice[1].get_text().strip()
 		language = soup.find_all('span', {'class': ['text-large heading-normal-for-small-only right-for-medium-up text-right showmore']})
 		if language:
 			details['language'] = language[0].get_text().strip()
-		details['office_location'] = soup.find(attrs={"data-js-id":"doctor-address"}).get_text().strip()
+		office_location = soup.find(attrs={"data-js-id":"doctor-address"})
+		if office_location:
+			details['office_location'] = office_location.get_text().strip()
 		affiliations = []
 		for affiliation in soup.find_all('div', {'class': ['search-result-content flex-row flex-ungrid']}):
 			affiliations.append(affiliation.text.strip())
 		details['hospital_affiliation'] = affiliations
-		experience = soup.find(attrs={"data-nav-waypoint":"experience"})		
-		details['subspecialties'] = experience.findChildren('p', {'class': ['text-large block-tight']})[0].get_text().strip()		
+		experience = soup.find(attrs={"data-nav-waypoint":"experience"})
+		if experience:
+			subspecialties = experience.findChildren('p', {'class': ['text-large block-tight']})
+			if subspecialties:
+				details['subspecialties'] = subspecialties[0].get_text().strip()		
 		for section_contents in soup.find_all('section', {'class': ['block-loosest']}):
 			h2_content = section_contents.find('h2', {'class': ['heading-larger block-normal']})
 			if h2_content and h2_content.get_text().strip() == 'Education & Medical Training':
@@ -101,18 +108,11 @@ class SearchDoctors:
 					doctor_url = item['href']
 					doctor_detail_contents = self.load_url(doctor_url)
 					doctor_id = self.get_doctor_id(doctor_url)			
-					# doctor_details = self.get_docter_details(doctor_id, doctor_detail_contents)
-					process = Thread(target=self.get_docter_details, args=[doctor_id, doctor_detail_contents])
-					process.start()
-					self.threads.append(process)
+					doctor_details = self.get_docter_details(doctor_id, doctor_detail_contents)					
 			else:
 				item_name = item.a.get_text().strip()
 				item_url = item.a['href']
-				self.get_page_items(item_url)
-
-		for process in self.threads:
-			print process,self.process_start_time,datetime.datetime.now()
-			process.join()
+				self.enclosure_queue.put(item_url)
 
 	def parse_index_items(self, content, element='li', class_name='index-item'):
 		'''
@@ -126,36 +126,57 @@ class SearchDoctors:
 		'''
 		Load url
 		'''
+		time.sleep(1.5)
 		url = 'https://health.usnews.com'+url
 		headers = {'user-agent': 'Mozilla/5.0 (X11; U; Linux i686; en-US; rv:1.8.1.6) Gecko/20070802 SeaMonkey/1.1.4'}
 		response = requests.get(url, headers=headers)
 		return response.content			
 
-	def get_page_items(self, url):
+	def get_page_items(self, i, q):
 		'''
 		Get all the items from the page
 		'''
-		result_contents = self.load_url(url)
-		url_text = ['specialists-index']
-		if any(text in url for text in url_text):
-			result_items = self.parse_index_items(result_contents)			
-		else:
-			details_from_url = url.split('/')
-			self.city_name = details_from_url[-1]
-			self.specialist = details_from_url[-3]
-			result_items = self.parse_index_items(result_contents, element='a', class_name='search-result-link')
-		self.manage_items(result_items)
+		while True:
+			url = q.get()
+			result_contents = self.load_url(url)
+			url_text = ['specialists-index']
+			if any(text in url for text in url_text):
+				result_items = self.parse_index_items(result_contents)
+				result_items = result_items
+			else:
+				details_from_url = url.split('/')
+				self.city_name = details_from_url[-1]
+				self.specialist = details_from_url[-3]
+				result_items = self.parse_index_items(result_contents, element='a', class_name='search-result-link')
+			self.manage_items(result_items)
+			q.task_done()
 
 	def __init__(self, state_name):
 		self.state_name = state_name	
 		state_url = '/doctors/city-index/'+self.state_name
 		state_url_result_contents = self.load_url(state_url)
-		state_result_items = self.parse_index_items(state_url_result_contents)
+		# state_result_items = self.parse_index_items(state_url_result_contents)
+
+		soup = BeautifulSoup(state_url_result_contents, 'html.parser')
+		state_url_result_contents = soup.find_all('div', {'class': ['flex-small-12 flex-large-6']})[1]
+		state_result_items = state_url_result_contents.find_all('li', {'class': ['index-item']})
+
+		
 		self.process_start_time = datetime.datetime.now()
-		for item in state_result_items[:1]:
+		print "Start-----------",datetime.datetime.now()
+		for i in range(self.num_fetch_threads):
+			worker = Thread(target=self.get_page_items, args=(i, self.enclosure_queue,))
+			worker.setDaemon(True)
+			worker.start()
+
+		for item in state_result_items:
 			item_name = item.a.get_text().strip()
 			item_url = item.a['href']
-			self.get_page_items(item_url)
+			print item_url,"..........."
+			self.enclosure_queue.put(item_url)
+
+		self.enclosure_queue.join()	
+		print "End----------",datetime.datetime.now()	
 
 if __name__ == '__main__':
     main()
